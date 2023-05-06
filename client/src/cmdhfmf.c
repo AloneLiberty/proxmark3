@@ -18,7 +18,6 @@
 
 #include "cmdhfmf.h"
 #include <ctype.h>
-
 #include "cmdparser.h"             // command_t
 #include "commonutil.h"            // ARRAYLEN
 #include "comms.h"                 // clearCommandBuffer
@@ -37,23 +36,6 @@
 #include "crypto/libpcrypto.h"
 #include "wiegand_formats.h"
 #include "wiegand_formatutils.h"
-
-#define MIFARE_4K_MAXBLOCK      256
-#define MIFARE_2K_MAXBLOCK      128
-#define MIFARE_1K_MAXBLOCK      64
-#define MIFARE_MINI_MAXBLOCK    20
-
-#define MIFARE_4K_MAXSECTOR     40
-#define MIFARE_2K_MAXSECTOR     32
-#define MIFARE_1K_MAXSECTOR     16
-#define MIFARE_MINI_MAXSECTOR   5
-
-#define MIFARE_4K_MAX_BYTES     4096
-#define MIFARE_2K_MAX_BYTES     2048
-#define MIFARE_1K_MAX_BYTES     1024
-#define MIFARE_MINI_MAX_BYTES   320
-
-#define MIFARE_KEY_SIZE         6
 
 static int CmdHelp(const char *Cmd);
 
@@ -2859,8 +2841,11 @@ tryNested:
                                 }
                                 break;
                             }
-                            case PM3_ESTATIC_NONCE:
+                            case PM3_ESTATIC_NONCE: {
                                 PrintAndLogEx(ERR, "Error: Static encrypted nonce detected. Aborted\n");
+
+                                e_sector[current_sector_i].Key[current_key_type_i] = 0xffffffffffff;;
+                                e_sector[current_sector_i].foundKey[current_key_type_i] = false;
                                 // Show the results to the user
                                 PrintAndLogEx(NORMAL, "");
                                 PrintAndLogEx(SUCCESS, _GREEN_("found keys:"));
@@ -2869,6 +2854,7 @@ tryNested:
                                 free(e_sector);
                                 free(fptr);
                                 return isOK;
+                            }
                             case PM3_SUCCESS: {
                                 calibrate = false;
                                 e_sector[current_sector_i].Key[current_key_type_i] = bytes_to_num(tmp_key, 6);
@@ -2893,6 +2879,7 @@ tryHardnested: // If the nested attack fails then we try the hardnested attack
                                           slow ? "Yes" : "No");
                         }
 
+                        foundkey = 0;
                         isOK = mfnestedhard(mfFirstBlockOfSector(sectorno), keytype, key, mfFirstBlockOfSector(current_sector_i), current_key_type_i, NULL, false, false, slow, 0, &foundkey, NULL);
                         DropField();
                         if (isOK) {
@@ -2907,6 +2894,10 @@ tryHardnested: // If the nested attack fails then we try the hardnested attack
                                 }
                                 case PM3_ESTATIC_NONCE: {
                                     PrintAndLogEx(ERR, "\nError: Static encrypted nonce detected. Aborted\n");
+
+                                    e_sector[current_sector_i].Key[current_key_type_i] = 0xffffffffffff;;
+                                    e_sector[current_sector_i].foundKey[current_key_type_i] = false;
+
                                     // Show the results to the user
                                     PrintAndLogEx(NORMAL, "");
                                     PrintAndLogEx(SUCCESS, _GREEN_("found keys:"));
@@ -3615,9 +3606,6 @@ void showSectorTable(sector_t *k_sector, uint8_t k_sectorsCount) {
 
 void readerAttack(sector_t *k_sector, uint8_t k_sectorsCount, nonces_t data, bool setEmulatorMem, bool verbose) {
 
-    uint64_t key = 0;
-    bool success = false;
-
     if (k_sector == NULL) {
         int32_t res = initSectorTable(&k_sector, k_sectorsCount);
         if (res != k_sectorsCount) {
@@ -3626,8 +3614,8 @@ void readerAttack(sector_t *k_sector, uint8_t k_sectorsCount, nonces_t data, boo
         }
     }
 
-    success = mfkey32_moebius(&data, &key);
-    if (success) {
+    uint64_t key = 0;
+    if (mfkey32_moebius(&data, &key)) {
         uint8_t sector = data.sector;
         uint8_t keytype = data.keytype;
 
@@ -3642,7 +3630,7 @@ void readerAttack(sector_t *k_sector, uint8_t k_sectorsCount, nonces_t data, boo
 
         //set emulator memory for keys
         if (setEmulatorMem) {
-            uint8_t memBlock[16] = {0, 0, 0, 0, 0, 0, 0xff, 0x0F, 0x80, 0x69, 0, 0, 0, 0, 0, 0};
+            uint8_t memBlock[16] = {0, 0, 0, 0, 0, 0, 0xFF, 0x07, 0x80, 0x69, 0, 0, 0, 0, 0, 0};
             num_to_bytes(k_sector[sector].Key[0], 6, memBlock);
             num_to_bytes(k_sector[sector].Key[1], 6, memBlock + 10);
             //iceman,  guessing this will not work so well for 4K tags.
@@ -3899,57 +3887,48 @@ void printKeyTableEx(uint8_t sectorscnt, sector_t *e_sector, uint8_t start_secto
     PrintAndLogEx(SUCCESS, "-----+-----+--------------+---+--------------+----");
     PrintAndLogEx(SUCCESS, " Sec | Blk | key A        |res| key B        |res");
     PrintAndLogEx(SUCCESS, "-----+-----+--------------+---+--------------+----");
+
+    bool extended_legend = false;
     for (uint8_t i = 0; i < sectorscnt; i++) {
 
-        snprintf(strA, sizeof(strA), "------------");
-        snprintf(strB, sizeof(strB), "------------");
-
-        if (e_sector[i].foundKey[0])
-            snprintf(strA, sizeof(strA), "%012" PRIX64, e_sector[i].Key[0]);
-
-        if (e_sector[i].foundKey[1])
-            snprintf(strB, sizeof(strB), "%012" PRIX64, e_sector[i].Key[1]);
-
-        if (e_sector[i].foundKey[0] > 1) {
-            PrintAndLogEx(SUCCESS, " "_YELLOW_("%03d")" | %03d | " _GREEN_("%s")" | " _BRIGHT_GREEN_("%c")" | " _GREEN_("%s")" | " _BRIGHT_GREEN_("%c")
-                          , i
-                          , mfSectorTrailerOfSector(i)
-                          , strA, e_sector[i].foundKey[0]
-                          , strB, e_sector[i].foundKey[1]
-                         );
-        } else {
-
-            // keep track if we use start_sector or i...
-            uint8_t s = start_sector;
-            if (start_sector == 0)
-                s = i;
-
-            if (e_sector[i].foundKey[0])  {
-                snprintf(strA, sizeof(strA), _GREEN_("%012" PRIX64), e_sector[i].Key[0]);
-                snprintf(resA, sizeof(resA), _BRIGHT_GREEN_("%d"), 1);
-            } else {
-                snprintf(strA, sizeof(strA), _RED_("%s"), "------------");
-                snprintf(resA, sizeof(resA), _RED_("%d"), 0);
-            }
-
-            if (e_sector[i].foundKey[1]) {
-                snprintf(strB, sizeof(strB), _GREEN_("%012" PRIX64), e_sector[i].Key[1]);                
-                snprintf(resB, sizeof(resB), _BRIGHT_GREEN_("%d"), 1);
-            } else {
-                snprintf(strB, sizeof(strB), _RED_("%s"), "------------");
-                snprintf(resB, sizeof(resB), _RED_("%d"), 0);
-            }
-
-            PrintAndLogEx(SUCCESS, " " _YELLOW_("%03d") " | %03d | %s | %s | %s | %s"
-                          , s
-                          , mfSectorTrailerOfSector(s)
-                          , strA, resA
-                          , strB, resB
-                         );
+        if ((e_sector[i].foundKey[0] > 1) || (e_sector[i].foundKey[1] > 1)) {
+            extended_legend = true;
         }
+
+        if (e_sector[i].foundKey[0]) {
+            snprintf(strA, sizeof(strA), _GREEN_("%012" PRIX64), e_sector[i].Key[0]);
+            snprintf(resA, sizeof(resA), _BRIGHT_GREEN_("%c"), e_sector[i].foundKey[0]);
+        } else {
+            snprintf(strA, sizeof(strA), _RED_("%s"), "------------");
+            snprintf(resA, sizeof(resA), _RED_("%d"), 0);
+        }
+
+        if (e_sector[i].foundKey[1]) {
+            snprintf(strB, sizeof(strB), _GREEN_("%012" PRIX64), e_sector[i].Key[1]);
+            snprintf(resB, sizeof(resB), _BRIGHT_GREEN_("%c"), e_sector[i].foundKey[1]);
+        } else {
+            snprintf(strB, sizeof(strB), _RED_("%s"), "------------");
+            snprintf(resB, sizeof(resB), _RED_("%d"), 0);
+        }
+
+        // keep track if we use start_sector or i
+        // show one sector or all.
+        uint8_t s = start_sector;
+        if (start_sector == 0) {
+            s = i;
+        }
+
+        PrintAndLogEx(SUCCESS, " " _YELLOW_("%03d") " | %03d | %s | %s | %s | %s"
+                    , s
+                    , mfSectorTrailerOfSector(s)
+                    , strA, resA
+                    , strB, resB
+                    );
     }
+
     PrintAndLogEx(SUCCESS, "-----+-----+--------------+---+--------------+----");
-    if (e_sector[0].foundKey[0] > 1) {
+
+    if (extended_legend) {
         PrintAndLogEx(INFO, "( "
                       _YELLOW_("D") ":Dictionary / "
                       _YELLOW_("S") ":darkSide / "
